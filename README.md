@@ -104,3 +104,180 @@ Class order (alphabetical): buildings, forest, glacier, mountain, sea, street.
 ## Tools
 
 Python, PyTorch, torchvision, scikit-learn, NumPy, Matplotlib, Kaggle Notebooks (GPU T4).
+# week 6 Brain Tumour MRI Screening with ResNet-18
+
+![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-ResNet--18-EE4C2C?logo=pytorch&logoColor=white)
+![Platform](https://img.shields.io/badge/Platform-Kaggle-20BEFF?logo=kaggle&logoColor=white)
+![Status](https://img.shields.io/badge/Use-Educational%20only-orange)
+
+Binary classification of brain MRI slices (**tumour** vs. **no tumour**) using transfer learning with an ImageNet-pretrained ResNet-18. The project puts as much weight on **data quality** (duplicate removal and leakage auditing) and **honest evaluation** as on the model itself.
+
+> **Disclaimer:** This is an educational project. It is not a medical device and must not be used for diagnosis or clinical decisions.
+
+---
+
+## Table of Contents
+
+- [Highlights](#highlights)
+- [Dataset](#dataset)
+- [Pipeline](#pipeline)
+- [Results](#results)
+- [Getting Started](#getting-started)
+- [Using the Trained Model](#using-the-trained-model)
+- [Repository Contents](#repository-contents)
+- [Limitations](#limitations)
+- [References](#references)
+- [Author and License](#author-and-license)
+
+---
+
+## Highlights
+
+- **Leak-aware data preparation:** 187 exact duplicates removed, followed by a near-duplicate audit that removed 260 validation and 230 test images having a twin in the training set.
+- **Imbalance handling:** class-weighted cross-entropy for a 3 : 1 tumour-heavy dataset.
+- **Two-phase transfer learning:** head-only training, then fine-tuning of the last residual block.
+- **Decision-threshold tuning** on the validation set for a target tumour sensitivity.
+- **Explainability:** Grad-CAM heat-maps for correct predictions and errors.
+- Runs end to end in about **two minutes of GPU time** on Kaggle.
+
+## Dataset
+
+| Item | Details |
+|---|---|
+| Source | Kaggle dataset [`bilawalmakhdoom/brain-tumor`](https://www.kaggle.com/datasets/bilawalmakhdoom/brain-tumor) |
+| Size | 7,200 MRI slices |
+| Folders | `glioma`, `meningioma`, `pituitary`, `notumor` (1,800 images each) |
+| Task framing | The three tumour folders are merged into **tumor** (5,400); `notumor` becomes **no_tumor** (1,800) |
+| Image properties | Widths from 173 to 1,338 px (median 512); mixed colour modes (RGB, grey, RGBA) |
+
+File names carry no patient identifier, which shapes the splitting strategy and is discussed under [Limitations](#limitations).
+
+## Pipeline
+
+1. **Index** all images and merge the four folders into two classes.
+2. **Inspect** image sizes, colour modes and sample slices.
+3. **Remove exact duplicates** using MD5 hashes (7,200 to 7,013 images).
+4. **Split** into train / validation / test with `StratifiedGroupKFold` (4,870 / 1,169 / 974 images).
+5. **Audit near-duplicates** with 32 x 32 standardised fingerprints and drop validation / test images that match a training image. Final sizes: **4,870 / 909 / 744**.
+6. **Pre-process** to 224 x 224, grey-scale replicated to 3 channels, ImageNet normalisation; augmentation (crop, flips, rotation, brightness / contrast) on training data only.
+7. **Train** in two phases (head only for 2 epochs, then `layer4` + head for 3 epochs) using Adam and class weights (no_tumor 2.087, tumor 0.658). The best epoch by validation macro-F1 is kept.
+8. **Evaluate** on the untouched test set, then **tune the decision threshold** on validation.
+9. **Explain** predictions with Grad-CAM and **save** the checkpoint.
+
+## Results
+
+Held-out test set: **744 images** (57 no_tumor, 687 tumor).
+
+### Default decision rule (argmax)
+
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| no_tumor | 0.962 | 0.895 | 0.927 | 57 |
+| tumor | 0.991 | 0.997 | 0.994 | 687 |
+
+**Accuracy 0.989 | Macro-F1 0.961.** Only 8 of 744 images are misclassified (6 healthy scans flagged as tumour, 2 tumours missed).
+
+### Tuned threshold (t = 0.986, target recall 0.95)
+
+| TP | FN | TN | FP | Sensitivity | Specificity | PPV | ROC-AUC |
+|---|---|---|---|---|---|---|---|
+| 665 | 22 | 55 | 2 | 0.968 | 0.965 | 0.997 | 0.994 |
+
+### Trade-off to be aware of
+
+| Operating point | Missed tumours | False alarms |
+|---|---|---|
+| Default (about 0.5) | **2** | 6 |
+| Tuned (t = 0.986) | 22 | **2** |
+
+The threshold search returns the *strictest* cut-off that still meets the recall target, so it reduces false alarms at the cost of more missed tumours. If missing a tumour is the worse outcome, raise `TARGET_RECALL` (for example to 0.99) or use a lower threshold.
+
+## Getting Started
+
+### Run on Kaggle (recommended)
+
+1. Create a new Kaggle notebook and import `brain-tumor-mri-professional-report.ipynb` (**File, then Import Notebook**).
+2. Attach the dataset via **Add Input** and search for `bilawalmakhdoom/brain-tumor`.
+3. In the first code cell, make sure `DATA_ROOT` matches the real dataset path shown in the Kaggle sidebar.
+4. In **Settings**, choose a **GPU** accelerator and switch **Internet on** (needed to download the ResNet-18 weights unless you add them as a Kaggle model input).
+5. Select **Run, then Restart & Run All**.
+
+The trained checkpoint is written to `/kaggle/working/week6_model.pt`.
+
+### Configuration
+
+All settings live in the first code cell:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `DATA_ROOT` / `TRAIN_DIR` | Kaggle dataset path | Folder containing the class sub-folders |
+| `TEST_DIR` | `None` | `None` means the test set is carved from the data |
+| `GRAYSCALE` | `True` | Convert images to grey-scale (3-channel) |
+| `IMG_SIZE` | `224` | Network input size |
+| `BACKBONE` | `resnet18` | Also supports `resnet50` and `efficientnet_b0` |
+| `BINARY` | `True` | Merge tumour types into one class |
+| `NORMAL_KEYWORD` | `notumor` | Folder-name keyword that marks the healthy class |
+| `TARGET_RECALL` | `0.95` | Minimum tumour sensitivity for threshold tuning |
+
+### Requirements
+
+Kaggle already provides everything. For a local run you need Python 3 and:
+
+```
+torch  torchvision  numpy  pandas  scikit-learn  matplotlib  pillow
+```
+
+## Using the Trained Model
+
+The checkpoint stores the weights, class order, backbone name, image size and the grey-scale flag. The tuned threshold (**0.986**) is *not* stored and must be applied by you.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import models, transforms
+from PIL import Image
+
+ckpt = torch.load('week6_model.pt', map_location='cpu')
+
+model = models.resnet18(weights=None)
+model.fc = nn.Linear(model.fc.in_features, len(ckpt['classes']))
+model.load_state_dict(ckpt['state_dict'])
+model.eval()
+
+tf = transforms.Compose([
+    transforms.Grayscale(num_output_channels=3),
+    transforms.Resize((ckpt['img_size'], ckpt['img_size'])),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
+
+img = Image.open('scan.jpg').convert('L')
+x = tf(img).unsqueeze(0)
+
+with torch.no_grad():
+    probs = F.softmax(model(x), dim=1)[0]
+
+p_tumor = probs[ckpt['classes'].index('tumor')].item()
+THRESHOLD = 0.986
+label = 'tumor' if p_tumor >= THRESHOLD else 'no_tumor'
+print(f'{label} (p_tumor = {p_tumor:.3f})')
+```
+
+## Repository Contents
+
+| File | Description |
+|---|---|
+| `brain-tumor-mri-professional-report.ipynb` | Full annotated notebook with code, outputs and written analysis |
+| `README.md` | This file |
+| `week6_model.pt` | Trained checkpoint (created when the notebook is run) |
+
+## Limitations
+
+- **No patient identifiers.** Slices from one patient may fall into different splits despite the near-duplicate audit, which could make results optimistic.
+- **Small healthy-class evaluation set** (69 validation, 57 test images) after leakage removal. Healthy-class metrics are uncertain, and one image shifts recall by about 1.8 points.
+- **Single split and seed.** No cross-validation or confidence intervals.
+- **Binary framing** hides how well each tumour type (glioma, meningioma, pituitary) is detected.
+- **No external validation** on data from another hospital or scanner.
+- Grad-CAM heat-maps are a plausibility check, not proof of correct reasoning
